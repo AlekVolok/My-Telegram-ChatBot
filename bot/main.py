@@ -3,7 +3,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 from bot.handlers.text_handler import handle_text
 from bot.utils.config import TELEGRAM_TOKEN
 
-async def start(update: Update, context):
+async def start(update: Update, context) -> None:
     await update.message.reply_text("Welcome to the bot!")
 
 if __name__ == '__main__':

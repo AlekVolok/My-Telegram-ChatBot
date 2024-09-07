@@ -1,4 +1,7 @@
 @echo off
+REM Set PYTHONPATH to the project root directory
+set PYTHONPATH=%~dp0
+
 REM Activate the virtual environment
 call venv\Scripts\activate
 
