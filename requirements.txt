@@ -2,3 +2,5 @@ python-telegram-bot==21.5
 openai
 sqlite3
 python-dotenv
+PyPDF2
+python-docx
