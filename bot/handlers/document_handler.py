@@ -36,6 +36,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
     file = await document.get_file()
 
+
     # Save the document to a temporary file
     with tempfile.NamedTemporaryFile(delete=False) as temp_file:
         temp_file_path = temp_file.name
@@ -53,7 +54,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await update.message.reply_text("Processing the document...")
 
         final_text = user_message + ":   " + extracted_text
-        print(final_text)
+        
         # Set the typing action while waiting for the response
         await update.message.chat.send_action(action="typing")
         

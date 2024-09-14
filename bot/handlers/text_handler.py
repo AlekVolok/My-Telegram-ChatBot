@@ -15,4 +15,3 @@ async def handle_text(update: Update, context):
     
     # Reply with the OpenAI response
     await update.message.reply_text(response.choices[0].message.content, parse_mode="Markdown")
-s
