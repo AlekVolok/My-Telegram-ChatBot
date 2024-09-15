@@ -139,7 +139,7 @@ def get_current_topic(user_id):
     else:
         # Start a new chat if there is no topic
         return start_new_chat(user_id)
-    
+
 
 def ensure_database_path():
     directory = os.path.dirname(DATABASE_PATH)
