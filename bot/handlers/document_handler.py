@@ -1,5 +1,6 @@
 import os
 import tempfile
+import tiktoken
 from telegram import Update
 from telegram.ext import ContextTypes
 from bot.altman.chat_api import get_openai_response
@@ -49,11 +50,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not extracted_text.strip():
             await update.message.reply_text("Sorry, I couldn't extract any text from this document.")
+            os.remove(temp_file_path)
             return
 
         # Send an initial message to the user to indicate that processing has started
         msg = await update.message.reply_text("Processing the document...")
-
+        
+        file_tokens = sqlite_manager.count_text_tokens(extracted_text)
+        if file_tokens > sqlite_manager.MAX_TOKENS:
+            await  update.message.reply_text(f"Sorry, the document is too large ({file_tokens} tokens) to process. The maximum allowed token count is {sqlite_manager.MAX_TOKENS}.")
+            os.remove(temp_file_path)
+            return
+        
         final_text = user_message + ":   " + extracted_text
         
         # Set the typing action while waiting for the response

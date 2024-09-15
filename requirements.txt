@@ -4,3 +4,4 @@ sqlite3
 python-dotenv
 PyPDF2
 python-docx
+tiktoken

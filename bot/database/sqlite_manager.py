@@ -1,8 +1,12 @@
 import sqlite3
 import time
+import tiktoken
 import os
 
 DATABASE_PATH = 'bot/database/chatbot.db'
+encoding = tiktoken.get_encoding("cl100k_base")
+ENCODER = tiktoken.encoding_for_model("gpt-4")
+MAX_TOKENS = 100000  # Maximum allowed token count
 
 # Function to initialize database and tables
 def init_db():
@@ -75,6 +79,21 @@ def save_message(user_id, topic, message, is_bot_response):
     conn.close()
 
 
+def count_tokens(messages):
+    """
+    Counts the total number of tokens for the given messages.
+    Each message is expected to have 'role' and 'content' fields.
+    """
+    total_tokens = 0
+    for message in messages:
+        total_tokens += count_text_tokens(message['content']) + 4  # 4 tokens per message for roles/metadata
+    return total_tokens
+
+
+def count_text_tokens(text:str):
+    return len(ENCODER.encode(text))
+
+
 def get_conversation_history(user_id, topic):
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
@@ -92,6 +111,13 @@ def get_conversation_history(user_id, topic):
     for msg, is_bot in messages:
         role = 'assistant' if is_bot else 'user'
         formatted_messages.append({"role": role, "content": msg})
+
+    # Ensure the token count does not exceed the limit
+    total_tokens = count_tokens(formatted_messages)
+    while total_tokens > MAX_TOKENS:
+        # Remove the oldest message
+        formatted_messages.pop(0)
+        total_tokens = count_tokens(formatted_messages)
 
     return formatted_messages
 
@@ -114,7 +140,7 @@ def get_current_topic(user_id):
         # Start a new chat if there is no topic
         return start_new_chat(user_id)
     
-    
+
 def ensure_database_path():
     directory = os.path.dirname(DATABASE_PATH)
     if not os.path.exists(directory):
