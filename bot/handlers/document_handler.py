@@ -5,6 +5,7 @@ from telegram.ext import ContextTypes
 from bot.altman.chat_api import get_openai_response
 from PyPDF2 import PdfReader
 import docx
+from bot.database import sqlite_manager
 
 # Helper function to extract text from a file
 def extract_text_from_file(file_path: str, mime_type: str) -> str:
@@ -58,11 +59,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Set the typing action while waiting for the response
         await update.message.chat.send_action(action="typing")
         
-        # Get response from OpenAI (sync)
-        response = get_openai_response(final_text)
+        # Database operations
+        user_id = sqlite_manager.register_user(update.message.from_user.username)
+        topic = sqlite_manager.get_current_topic(user_id)
+
+        # Get response from OpenAI 
+        openai_response = get_openai_response(final_text, user_id, topic)
+        sqlite_manager.save_message(user_id, topic, openai_response, is_bot_response=True)
         
         # Reply with the OpenAI response
-        await update.message.reply_text(response.choices[0].message.content, parse_mode="Markdown")
+        await update.message.reply_text(openai_response, parse_mode="Markdown")
 
     except Exception as e:
         await update.message.reply_text(f"An error occurred: {str(e)}")

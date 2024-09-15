@@ -1,17 +1,20 @@
 from telegram import Update
 from telegram.ext import ContextTypes
+from bot.database import sqlite_manager
 from bot.altman.chat_api import get_openai_response
 
 async def handle_text(update: Update, context):
-    """Handles text messages from users and sends responses from OpenAI synchronously."""
-    
-    user_message = update.message.text
+
+    user_id = sqlite_manager.register_user(update.message.from_user.username)
     
     # Set the typing action while waiting for the response
     await update.message.chat.send_action(action="typing")
     
-    # Get response from OpenAI (sync)
-    response = get_openai_response(user_message)
+    topic = sqlite_manager.get_current_topic(user_id)
+    sqlite_manager.save_message(user_id, topic, update.message.text, is_bot_response=False) 
+    
+    openai_response = get_openai_response(update.message.text, user_id, topic)
+    sqlite_manager.save_message(user_id, topic, openai_response, is_bot_response=True)
     
     # Reply with the OpenAI response
-    await update.message.reply_text(response.choices[0].message.content, parse_mode="Markdown")
+    await update.message.reply_text(openai_response, parse_mode="Markdown")
