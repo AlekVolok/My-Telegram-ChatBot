@@ -4,6 +4,8 @@ from bot.handlers.text_handler import handle_text
 from bot.handlers.document_handler import handle_document
 from bot.utils.config import TELEGRAM_TOKEN
 
+import pdb
+
 async def start(update: Update, context) -> None:
     await update.message.reply_text("Welcome to the bot!")
 
@@ -15,3 +17,4 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     app.run_polling()
+    pdb.set_trace()

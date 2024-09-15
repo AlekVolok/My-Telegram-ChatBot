@@ -31,7 +31,7 @@ def extract_text_from_file(file_path: str, mime_type: str) -> str:
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
-    user_message = update.message.text if update.message.text else " " # Default message if no text is provided
+    user_message = update.message.caption if update.message.caption else " " # Default message if no text is provided
     # Download the document from Telegram
     document = update.message.document
     file = await document.get_file()
