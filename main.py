@@ -21,10 +21,10 @@ async def start_new(update: Update, context) -> None:
 async def help_handle(update: Update, context) -> None:
     await update.message.reply_text(
         "Commands:" 
-        "/new - Start new dialog"
-        "/start - Start the bot"
-        "/topic - Show current topic"
-        "/help - Show help message"
+        "\n/new - Start new dialog"
+        "\n/start - Start the bot"
+        "\n/topic - Show current topic"
+        "\n/help - Show help message"
     )
 
 
