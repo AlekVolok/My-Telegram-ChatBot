@@ -14,7 +14,7 @@ def get_openai_response(prompt: str, user_id, topic):
     conversation_history.append({"role": "user", "content": prompt})
 
     response = client.chat.completions.create(
-        model="gpt-4o-mini-2024-07-18",  # Replace with the model you're using
+        model="gpt-4o",  # Replace with the model you're using
         messages=conversation_history
     )
     
