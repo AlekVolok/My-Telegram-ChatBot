@@ -24,7 +24,7 @@ import tiktoken
 import docx
 from PyPDF2 import PdfReader
 import aiosqlite  # Use aiosqlite for async database operations
-from openai import OpenAI  # Correct import for OpenAI
+from openai import OpenAI  # Retained OpenAI import as per user's instruction
 import google.generativeai as genai  # Import Gemini's SDK
 
 ### CONFIG ###
@@ -41,7 +41,7 @@ MODELS_INFO = {
         "scores": {"speed": 5, "accuracy": 3},
         "provider": "openai",
         "api_model": "gpt-4o-mini",
-        "max_tokens": 100000
+        "max_tokens": 100000  # Per-model max_tokens
     },
     "gpt-4o": {
         "name": "GPT-4o",
@@ -49,7 +49,7 @@ MODELS_INFO = {
         "scores": {"speed": 3, "accuracy": 5},
         "provider": "openai",
         "api_model": "gpt-4o",
-        "max_tokens": 100000
+        "max_tokens": 100000  # Per-model max_tokens
     },
     "gemini": {
         "name": "Gemini",
@@ -57,7 +57,7 @@ MODELS_INFO = {
         "scores": {"speed": 4, "accuracy": 4},
         "provider": "gemini",
         "api_model": "gemini-1.5-flash",
-        "max_tokens": 900000
+        "max_tokens": 9000  # Per-model max_tokens. Reduced because of Free Tier limit
     },
     "bing": {
         "name": "Bing",
@@ -65,14 +65,14 @@ MODELS_INFO = {
         "scores": {"speed": 5, "accuracy": 2},
         "provider": "bing",
         "api_model": "bing",
-        "max_tokens": 100000
+        "max_tokens": 100000  # Per-model max_tokens
     }
 }
 
 ### DATABASE ###
 DATABASE_PATH = "chatbot.db"
 ENCODER = tiktoken.encoding_for_model("gpt-4")
-MAX_TOKENS = 100000  # Maximum allowed token count
+# MAX_TOKENS = 100000  # Removed global MAX_TOKENS as we now have per-model max_tokens
 DEFAULT_MODEL = "gpt-4o-mini"
 
 # Conversation states
@@ -199,7 +199,7 @@ def count_text_tokens(text: str):
     return len(ENCODER.encode(text))
 
 # Function to get conversation history
-async def get_conversation_history(user_id, topic):
+async def get_conversation_history(user_id, topic, max_tokens):
     async with aiosqlite.connect(DATABASE_PATH) as conn:
         c = await conn.cursor()
         # Check if the topic is not deleted
@@ -224,9 +224,9 @@ async def get_conversation_history(user_id, topic):
         role = 'assistant' if is_bot else 'user'
         formatted_messages.append({"role": role, "content": msg})
 
-    # Ensure the token count does not exceed the limit
+    # Ensure the token count does not exceed the model's max_tokens
     total_tokens = count_tokens(formatted_messages)
-    while total_tokens > MAX_TOKENS and formatted_messages:
+    while total_tokens > max_tokens and formatted_messages:
         # Remove the oldest message
         formatted_messages.pop(0)
         total_tokens = count_tokens(formatted_messages)
@@ -300,23 +300,25 @@ async def set_current_topic(user_id, topic):
 ### OPENAI & GEMINI CONFIGURATION ###
 # Configure OpenAI
 client = OpenAI()
-client.api_key = OPENAI_API_KEY
+client.api_key = OPENAI_API_KEY  # Retained OpenAI configuration as per user's instruction
 
 # Configure Gemini
-genai.configure(api_key=GEMINI_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)  # Added Gemini configuration
 
 ### RESPONSE GENERATION ###
 async def get_ai_response(prompt: str, user_id, topic):
     """Generates a response using the selected AI model."""
-    conversation_history = await get_conversation_history(user_id, topic)
+    selected_model = await get_user_model(user_id)
+    max_tokens = MODELS_INFO[selected_model]['max_tokens']  # Retrieve per-model max_tokens
+    conversation_history = await get_conversation_history(user_id, topic, max_tokens)
     conversation_history.append({"role": "user", "content": prompt})
 
-    selected_model = await get_user_model(user_id)
     provider = MODELS_INFO[selected_model]["provider"]
     api_model = MODELS_INFO[selected_model]["api_model"]
 
     try:
         if provider == "openai":
+            # OpenAI's response generation remains unchanged
             response = await asyncio.to_thread(
                 client.chat.completions.create,
                 model=api_model,
@@ -417,9 +419,14 @@ async def handle_document(update: Update, context):
         # Send an initial message to the user to indicate that processing has started
         msg = await update.message.reply_text("Processing the document...")
         
+        # Retrieve the user's selected model and its max_tokens
+        user_id = update.message.from_user.id
+        selected_model = await get_user_model(user_id)
+        max_tokens = MODELS_INFO[selected_model]['max_tokens']  # Retrieve per-model max_tokens
+
         file_tokens = count_text_tokens(extracted_text)
-        if file_tokens > MAX_TOKENS:
-            await update.message.reply_text(f"Sorry, the document is too large ({file_tokens} tokens) to process. The maximum allowed token count is {MAX_TOKENS}.")
+        if file_tokens > max_tokens:
+            await update.message.reply_text(f"Sorry, the document is too large ({file_tokens} tokens) to process. The maximum allowed token count for {MODELS_INFO[selected_model]['name']} is {max_tokens}.")
             os.remove(temp_file_path)
             return
 
@@ -429,7 +436,6 @@ async def handle_document(update: Update, context):
         await update.message.chat.send_action(action="typing")
 
         # Database operations
-        user_id = update.message.from_user.id
         username = update.message.from_user.username
         await register_user(user_id, username)
         topic = await get_current_topic(user_id)
@@ -438,7 +444,7 @@ async def handle_document(update: Update, context):
             await update.message.reply_text("Please start a new chat using /new command.")
             return
 
-        # Get response from AI 
+        # Get response from AI
         ai_response = await get_ai_response(final_text, user_id, topic)
         await save_message(user_id, topic, ai_response, is_bot_response=True)
         
