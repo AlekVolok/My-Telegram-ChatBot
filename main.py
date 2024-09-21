@@ -25,18 +25,44 @@ import docx
 from PyPDF2 import PdfReader
 import aiosqlite  # Use aiosqlite for async database operations
 from openai import OpenAI  # Correct import for OpenAI
+import google.generativeai as genai  # Import Gemini's SDK
 
 ### CONFIG ###
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Add Gemini API Key
 
 MODELS_INFO = {
-    "gpt-4o-mini": {"name": "GPT-4o Mini", "description": "Lightweight GPT-4 model", "scores": {"speed": 5, "accuracy": 3}},
-    "gpt-4o": {"name": "GPT-4o", "description": "Great for most tasks", "scores": {"speed": 3, "accuracy": 5}},
-    "gemini": {"name": "Gemini", "description": "Google's new Gemini AI", "scores": {"speed": 4, "accuracy": 4}},
-    "bing": {"name": "Bing", "description": "Bing AI", "scores": {"speed": 5, "accuracy": 2}}
+    "gpt-4o-mini": {
+        "name": "GPT-4o Mini",
+        "description": "Lightweight GPT-4 model",
+        "scores": {"speed": 5, "accuracy": 3},
+        "provider": "openai",
+        "api_model": "gpt-4o-mini"
+    },
+    "gpt-4o": {
+        "name": "GPT-4o",
+        "description": "Great for most tasks",
+        "scores": {"speed": 3, "accuracy": 5},
+        "provider": "openai",
+        "api_model": "gpt-4o"
+    },
+    "gemini": {
+        "name": "Gemini",
+        "description": "Google's new Gemini AI",
+        "scores": {"speed": 4, "accuracy": 4},
+        "provider": "gemini",
+        "api_model": "gemini-1.5-flash"
+    },
+    "bing": {
+        "name": "Bing",
+        "description": "GPT-4 with Bing internet search",
+        "scores": {"speed": 5, "accuracy": 2},
+        "provider": "bing",
+        "api_model": "bing"
+    }
 }
 
 ### DATABASE ###
@@ -188,7 +214,7 @@ async def get_conversation_history(user_id, topic):
         )
         messages = await c.fetchall()
 
-    # Format messages for OpenAI API
+    # Format messages for AI API
     formatted_messages = []
     for msg, is_bot in messages:
         role = 'assistant' if is_bot else 'user'
@@ -240,7 +266,7 @@ async def get_user_model(user_id):
         result = await c.fetchone()
 
     if result and result[0]:
-        return result[0]  # Return the model (e.g., 'gpt-4o-mini')
+        return result[0]  # Return the model key (e.g., 'gpt-4o-mini')
     else:
         await set_user_model(user_id, DEFAULT_MODEL)
     return DEFAULT_MODEL
@@ -267,24 +293,52 @@ async def set_current_topic(user_id, topic):
     except aiosqlite.Error as e:
         print(f"Error setting current topic for user ID {user_id}: {e}")
 
-### OPENAI ###
+### OPENAI & GEMINI CONFIGURATION ###
+# Configure OpenAI
 client = OpenAI()
 client.api_key = OPENAI_API_KEY
 
-async def get_openai_response(prompt: str, user_id, topic):
-    """Sends a text prompt to OpenAI and returns the response."""
+# Configure Gemini
+genai.configure(api_key=GEMINI_API_KEY)
+
+### RESPONSE GENERATION ###
+async def get_ai_response(prompt: str, user_id, topic):
+    """Generates a response using the selected AI model."""
     conversation_history = await get_conversation_history(user_id, topic)
     conversation_history.append({"role": "user", "content": prompt})
 
+    selected_model = await get_user_model(user_id)
+    provider = MODELS_INFO[selected_model]["provider"]
+    api_model = MODELS_INFO[selected_model]["api_model"]
+
     try:
-        response = await asyncio.to_thread(
-            client.chat.completions.create,
-            model=await get_user_model(user_id),
-            messages=conversation_history
-        )
-        return response.choices[0].message.content
+        if provider == "openai":
+            response = await asyncio.to_thread(
+                client.chat.completions.create,
+                model=api_model,
+                messages=conversation_history
+            )
+            return response.choices[0].message.content.strip()
+        
+        elif provider == "gemini":
+            # Using Gemini's API for response generation
+            model = genai.GenerativeModel(api_model)
+            response = await asyncio.to_thread(
+                model.generate_content,
+                prompt
+            )
+            return response.text.strip()
+        
+        elif provider == "bing":
+            # Placeholder for Bing integration
+            # You need to implement Bing's API similar to OpenAI and Gemini
+            return "Bing integration is not yet implemented."
+        
+        else:
+            return "Selected AI provider is not supported."
+    
     except Exception as e:
-        print(f"Error getting OpenAI response: {e}")
+        print(f"Error generating response with {provider}: {e}")
         return "Sorry, I couldn't process your request at the moment."
 
 ### HELPERS ###
@@ -330,11 +384,11 @@ async def handle_text(update: Update, context):
 
     await save_message(user_id, topic, update.message.text, is_bot_response=False) 
 
-    openai_response = await get_openai_response(update.message.text, user_id, topic)
-    await save_message(user_id, topic, openai_response, is_bot_response=True)
+    ai_response = await get_ai_response(update.message.text, user_id, topic)
+    await save_message(user_id, topic, ai_response, is_bot_response=True)
 
-    # Reply with the OpenAI response
-    await update.message.reply_text(openai_response, parse_mode="Markdown")
+    # Reply with the AI response
+    await update.message.reply_text(ai_response, parse_mode="Markdown")
 
 async def handle_document(update: Update, context):
     user_message = update.message.caption if update.message.caption else " "  # Default message if no text is provided
@@ -380,12 +434,12 @@ async def handle_document(update: Update, context):
             await update.message.reply_text("Please start a new chat using /new command.")
             return
 
-        # Get response from OpenAI 
-        openai_response = await get_openai_response(final_text, user_id, topic)
-        await save_message(user_id, topic, openai_response, is_bot_response=True)
+        # Get response from AI 
+        ai_response = await get_ai_response(final_text, user_id, topic)
+        await save_message(user_id, topic, ai_response, is_bot_response=True)
         
-        # Reply with the OpenAI response
-        await update.message.reply_text(openai_response, parse_mode="Markdown")
+        # Reply with the AI response
+        await update.message.reply_text(ai_response, parse_mode="Markdown")
 
     except Exception as e:
         await update.message.reply_text(f"An error occurred: {str(e)}")
@@ -459,58 +513,6 @@ async def post_init(application):
         BotCommand("/help", "Show help message"),
     ])
 
-def get_settings_menu(user_id):
-    current_model = asyncio.run(get_user_model(user_id))
-    current_topic = asyncio.run(get_current_topic(user_id))
-
-    text = f"**Current Model:** {MODELS_INFO[current_model]['name']}\n"
-    text += f"**Current Topic:** {current_topic}\n\n"
-
-    text += f"{MODELS_INFO[current_model]['description']}\n\n"
-
-    text += "**Model Scores:**\n"
-    score_dict = MODELS_INFO[current_model]["scores"]
-    for score_key, score_value in score_dict.items():
-        text += "🟢" * score_value + "⚪️" * (5 - score_value) + f" – {score_key.capitalize()}\n"
-
-    text += "\n**Select Model:**"
-
-    # Buttons for models
-    model_buttons = []
-    for model_key in MODELS_INFO:
-        title = MODELS_INFO[model_key]["name"]
-        if model_key == current_model:
-            title = "✅ " + title
-
-        model_buttons.append(
-            InlineKeyboardButton(title, callback_data=f"set_model|{model_key}")
-        )
-
-    # Now, add topic management
-    text += "\n\n**Your Topics:**"
-    # This will be handled asynchronously in the handler
-
-    # Placeholder buttons; actual buttons will be added in the handler
-    # Add a button to delete topics
-    delete_topic_button = InlineKeyboardButton("🗑 Delete Topic", callback_data="delete_topic_menu")
-
-    # Organize buttons
-    reply_markup = InlineKeyboardMarkup([
-        model_buttons,
-        [delete_topic_button]
-    ])
-
-    return text, reply_markup
-
-async def settings_handle(update: Update, context):
-    user_id = update.message.from_user.id
-    username = update.message.from_user.username
-    await register_user(user_id, username)
-    
-    text, reply_markup = await get_settings_menu_async(user_id)
-
-    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-
 async def get_settings_menu_async(user_id):
     current_model = await get_user_model(user_id)
     current_topic = await get_current_topic(user_id)
@@ -565,6 +567,15 @@ async def get_settings_menu_async(user_id):
     ])
 
     return text, reply_markup
+
+async def settings_handle(update: Update, context):
+    user_id = update.message.from_user.id
+    username = update.message.from_user.username
+    await register_user(user_id, username)
+    
+    text, reply_markup = await get_settings_menu_async(user_id)
+
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def set_model_handle(update: Update, context):
     query = update.callback_query
