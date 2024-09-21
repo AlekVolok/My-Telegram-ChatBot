@@ -40,28 +40,32 @@ MODELS_INFO = {
         "description": "Lightweight GPT-4 model",
         "scores": {"speed": 5, "accuracy": 3},
         "provider": "openai",
-        "api_model": "gpt-4o-mini"
+        "api_model": "gpt-4o-mini",
+        "max_tokens": 100000
     },
     "gpt-4o": {
         "name": "GPT-4o",
         "description": "Great for most tasks",
         "scores": {"speed": 3, "accuracy": 5},
         "provider": "openai",
-        "api_model": "gpt-4o"
+        "api_model": "gpt-4o",
+        "max_tokens": 100000
     },
     "gemini": {
         "name": "Gemini",
-        "description": "Google's new Gemini AI",
+        "description": "Google's new Gemini AI. Multi-modal capabilities. 1M token limit!",
         "scores": {"speed": 4, "accuracy": 4},
         "provider": "gemini",
-        "api_model": "gemini-1.5-flash"
+        "api_model": "gemini-1.5-flash",
+        "max_tokens": 900000
     },
     "bing": {
         "name": "Bing",
         "description": "GPT-4 with Bing internet search",
         "scores": {"speed": 5, "accuracy": 2},
         "provider": "bing",
-        "api_model": "bing"
+        "api_model": "bing",
+        "max_tokens": 100000
     }
 }
 
