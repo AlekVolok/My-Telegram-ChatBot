@@ -24,6 +24,7 @@ import tiktoken
 import docx
 from PyPDF2 import PdfReader
 import aiosqlite  # Use aiosqlite for async database operations
+from openai import OpenAI  # Correct import for OpenAI
 
 ### CONFIG ###
 load_dotenv()
@@ -68,6 +69,7 @@ async def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
                 topic TEXT,
+                deleted INTEGER DEFAULT 0,  -- 0 = Active, 1 = Deleted
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
@@ -88,62 +90,71 @@ async def init_db():
 
         await conn.commit()
 
+# Function to migrate database (add 'deleted' column if not exists)
+async def migrate_db():
+    async with aiosqlite.connect(DATABASE_PATH) as conn:
+        c = await conn.cursor()
+
+        # Check if 'deleted' column exists in 'topics' table
+        await c.execute("PRAGMA table_info(topics)")
+        columns = await c.fetchall()
+        column_names = [column[1] for column in columns]
+        if 'deleted' not in column_names:
+            await c.execute("ALTER TABLE topics ADD COLUMN deleted INTEGER DEFAULT 0")
+            await conn.commit()
+
+# Function to register a user
 async def register_user(user_id, username):
-    """Register a new user or return the existing user's ID."""
-    try:
-        async with aiosqlite.connect(DATABASE_PATH) as conn:
-            c = await conn.cursor()
-            await c.execute("SELECT id, current_model, current_topic FROM users WHERE id=?", (user_id,))
-            result = await c.fetchone()
+    """Register a new user or update existing user."""
+    async with aiosqlite.connect(DATABASE_PATH) as conn:
+        c = await conn.cursor()
+        await c.execute("SELECT id, current_model, current_topic FROM users WHERE id=?", (user_id,))
+        result = await c.fetchone()
 
-            if result:
-                # If current_model or current_topic is None, set it to the default
-                if result[1] is None or result[2] is None:
-                    await c.execute("UPDATE users SET current_model = ?, current_topic = ? WHERE id = ?", (DEFAULT_MODEL, None, user_id))
-                    await conn.commit()
-            else:
-                # Insert user with default model and no current topic
-                await c.execute("INSERT INTO users (id, username, current_model, current_topic) VALUES (?, ?, ?, ?)", (user_id, username, DEFAULT_MODEL, None))
+        if result:
+            # If current_model is None, set it to the default
+            if result[1] is None:
+                await c.execute("UPDATE users SET current_model = ? WHERE id = ?", (DEFAULT_MODEL, user_id))
                 await conn.commit()
+        else:
+            # Insert user with default model and no current topic
+            await c.execute("INSERT INTO users (id, username, current_model, current_topic) VALUES (?, ?, ?, ?)", 
+                          (user_id, username, DEFAULT_MODEL, None))
+            await conn.commit()
 
-        return user_id
-    except aiosqlite.Error as e:
-        print(f"Error registering user {username}: {e}")
-        return None
-
+# Function to start a new chat
 async def start_new_chat(user_id, topic=None):
     if not topic:
         topic = f'chat_{user_id}_{int(time.time())}'
 
-    # Insert the topic into the topics table if it doesn't exist
     async with aiosqlite.connect(DATABASE_PATH) as conn:
         c = await conn.cursor()
-        await c.execute("SELECT topic FROM topics WHERE user_id=? AND topic=?", (user_id, topic))
+        # Check if topic exists and is not deleted
+        await c.execute("SELECT topic FROM topics WHERE user_id=? AND topic=? AND deleted=0", (user_id, topic))
         result = await c.fetchone()
         if not result:
             await c.execute("INSERT INTO topics (user_id, topic) VALUES (?, ?)", (user_id, topic))
             await conn.commit()
 
-    # Update the user's current_topic
-    await set_current_topic(user_id, topic)
+        # Set current topic
+        await set_current_topic(user_id, topic)
 
-    # Log this new chat
-    await save_message(user_id, topic, "New chat started", is_bot_response=True)
+        # Log new chat
+        await save_message(user_id, topic, "New chat started", is_bot_response=True)
 
     return topic
 
+# Function to save a message
 async def save_message(user_id, topic, message, is_bot_response):
     async with aiosqlite.connect(DATABASE_PATH) as conn:
         c = await conn.cursor()
-
-        # Insert the message into the chat_history
         await c.execute(
             "INSERT INTO chat_history (user_id, topic, message, is_bot_response) VALUES (?, ?, ?, ?)",
-            (user_id, topic, message, is_bot_response)
+            (user_id, topic, message, int(is_bot_response))
         )
-
         await conn.commit()
 
+# Function to count tokens
 def count_tokens(messages):
     """
     Counts the total number of tokens for the given messages.
@@ -157,14 +168,24 @@ def count_tokens(messages):
 def count_text_tokens(text: str):
     return len(ENCODER.encode(text))
 
+# Function to get conversation history
 async def get_conversation_history(user_id, topic):
     async with aiosqlite.connect(DATABASE_PATH) as conn:
         c = await conn.cursor()
+        # Check if the topic is not deleted
+        await c.execute(
+            "SELECT deleted FROM topics WHERE user_id=? AND topic=?",
+            (user_id, topic)
+        )
+        topic_status = await c.fetchone()
+        if not topic_status or topic_status[0] == 1:
+            # Topic is deleted or does not exist
+            return []
+
         await c.execute(
             "SELECT message, is_bot_response FROM chat_history WHERE user_id=? AND topic=? ORDER BY created_at ASC",
             (user_id, topic)
         )
-
         messages = await c.fetchall()
 
     # Format messages for OpenAI API
@@ -175,13 +196,14 @@ async def get_conversation_history(user_id, topic):
 
     # Ensure the token count does not exceed the limit
     total_tokens = count_tokens(formatted_messages)
-    while total_tokens > MAX_TOKENS:
+    while total_tokens > MAX_TOKENS and formatted_messages:
         # Remove the oldest message
         formatted_messages.pop(0)
         total_tokens = count_tokens(formatted_messages)
 
     return formatted_messages
 
+# Function to get current topic
 async def get_current_topic(user_id):
     async with aiosqlite.connect(DATABASE_PATH) as conn:
         c = await conn.cursor()
@@ -189,27 +211,41 @@ async def get_current_topic(user_id):
             "SELECT current_topic FROM users WHERE id=?",
             (user_id,)
         )
-
         topic = await c.fetchone()
 
     if topic and topic[0]:
-        return topic[0]
+        # Verify that the topic is not deleted
+        async with aiosqlite.connect(DATABASE_PATH) as conn:
+            c = await conn.cursor()
+            await c.execute(
+                "SELECT deleted FROM topics WHERE user_id=? AND topic=?",
+                (user_id, topic[0])
+            )
+            result = await c.fetchone()
+            if result and result[0] == 0:
+                return topic[0]
+            else:
+                # Current topic is deleted; unset it
+                await set_current_topic(user_id, None)
+                return None
     else:
         # No current topic
         return None
 
+# Function to get user model
 async def get_user_model(user_id):
     async with aiosqlite.connect(DATABASE_PATH) as conn:
         c = await conn.cursor()
         await c.execute("SELECT current_model FROM users WHERE id=?", (user_id,))
         result = await c.fetchone()
 
-    if result:
+    if result and result[0]:
         return result[0]  # Return the model (e.g., 'gpt-4o-mini')
     else:
         await set_user_model(user_id, DEFAULT_MODEL)
     return DEFAULT_MODEL
 
+# Function to set user model
 async def set_user_model(user_id, model_key):
     """Set the model for the user."""
     try:
@@ -220,6 +256,7 @@ async def set_user_model(user_id, model_key):
     except aiosqlite.Error as e:
         print(f"Error setting model {model_key} for user ID {user_id}: {e}")
 
+# Function to set current topic
 async def set_current_topic(user_id, topic):
     """Set the current topic for the user."""
     try:
@@ -231,10 +268,7 @@ async def set_current_topic(user_id, topic):
         print(f"Error setting current topic for user ID {user_id}: {e}")
 
 ### OPENAI ###
-from openai import OpenAI
 client = OpenAI()
-
-# Set the OpenAI API key
 client.api_key = OPENAI_API_KEY
 
 async def get_openai_response(prompt: str, user_id, topic):
@@ -242,12 +276,16 @@ async def get_openai_response(prompt: str, user_id, topic):
     conversation_history = await get_conversation_history(user_id, topic)
     conversation_history.append({"role": "user", "content": prompt})
 
-    response = client.chat.completions.create(
-        model=await get_user_model(user_id),
-        messages=conversation_history
-    )
-    
-    return response.choices[0].message.content
+    try:
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model=await get_user_model(user_id),
+            messages=conversation_history
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"Error getting OpenAI response: {e}")
+        return "Sorry, I couldn't process your request at the moment."
 
 ### HELPERS ###
 # Helper function to extract text from a file
@@ -258,7 +296,9 @@ def extract_text_from_file(file_path: str, mime_type: str) -> str:
             pdf_reader = PdfReader(file)
             text = ""
             for page in pdf_reader.pages:
-                text += page.extract_text()
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted
         return text
     elif mime_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
         # Extract text from DOCX file
@@ -287,21 +327,20 @@ async def handle_text(update: Update, context):
 
     # Set the typing action while waiting for the response
     await update.message.chat.send_action(action="typing")
-    
+
     await save_message(user_id, topic, update.message.text, is_bot_response=False) 
-    
+
     openai_response = await get_openai_response(update.message.text, user_id, topic)
     await save_message(user_id, topic, openai_response, is_bot_response=True)
-    
+
     # Reply with the OpenAI response
     await update.message.reply_text(openai_response, parse_mode="Markdown")
 
-async def handle_document(update: Update, context: CallbackContext):
+async def handle_document(update: Update, context):
     user_message = update.message.caption if update.message.caption else " "  # Default message if no text is provided
     # Download the document from Telegram
     document = update.message.document
     file = await document.get_file()
-
 
     # Save the document to a temporary file
     with tempfile.NamedTemporaryFile(delete=False) as temp_file:
@@ -325,12 +364,12 @@ async def handle_document(update: Update, context: CallbackContext):
             await update.message.reply_text(f"Sorry, the document is too large ({file_tokens} tokens) to process. The maximum allowed token count is {MAX_TOKENS}.")
             os.remove(temp_file_path)
             return
-        
+
         final_text = user_message + ":   " + extracted_text
-        
+
         # Set the typing action while waiting for the response
         await update.message.chat.send_action(action="typing")
-        
+
         # Database operations
         user_id = update.message.from_user.id
         username = update.message.from_user.username
@@ -374,11 +413,17 @@ async def receive_topic_name(update: Update, context) -> int:
 
     if topic_name.lower() == 'auto':
         topic = await start_new_chat(user_id)
-        await update.message.reply_text(f"New chat started with topic: {topic}")
+        if topic:
+            await update.message.reply_text(f"New chat started with topic: {topic}")
+        else:
+            await update.message.reply_text("Failed to start a new chat. Please try again.")
     else:
         topic = topic_name
-        await start_new_chat(user_id, topic)
-        await update.message.reply_text(f"New chat started with topic: {topic}")
+        new_topic = await start_new_chat(user_id, topic)
+        if new_topic:
+            await update.message.reply_text(f"New chat started with topic: {new_topic}")
+        else:
+            await update.message.reply_text("Failed to start a new chat. Please try again.")
 
     return ConversationHandler.END
 
@@ -387,12 +432,14 @@ async def help_handle(update: Update, context) -> None:
     current_model = await get_user_model(user_id)
     current_topic = await get_current_topic(user_id)
     await update.message.reply_text(
-        f"Current Model: {current_model}"
-        f"\n\nTopic: {current_topic}"
-        "\n\n/new - Start new dialog"
+        f"**Current Model:** {MODELS_INFO[current_model]['name']}"
+        f"\n\n**Topic:** {current_topic}"
+        "\n\n**Commands:**"
+        "\n/new - Start new dialog"
         "\n/settings - Show settings"
         "\n/topic - Show current topic"
-        "\n/help - Show help message"
+        "\n/help - Show help message",
+        parse_mode="Markdown"
     )
 
 async def show_topic(update: Update, context) -> None:
@@ -400,32 +447,33 @@ async def show_topic(update: Update, context) -> None:
     username = update.message.from_user.username
     await register_user(user_id, username)
     topic = await get_current_topic(user_id)
-    await update.message.reply_text(f"Current topic: {topic}")
+    await update.message.reply_text(f"**Current topic:** {topic}", parse_mode="Markdown")
 
 async def post_init(application):
     await init_db()
+    await migrate_db()  # Ensure migration is applied
     await application.bot.set_my_commands([
         BotCommand("/new", "Start new dialog"),
-        BotCommand("/settings", "Start the bot"),
+        BotCommand("/settings", "Show settings"),
         BotCommand("/topic", "Show current topic"),
         BotCommand("/help", "Show help message"),
     ])
 
-async def get_settings_menu(user_id):
-    current_model = await get_user_model(user_id)
-    current_topic = await get_current_topic(user_id)
+def get_settings_menu(user_id):
+    current_model = asyncio.run(get_user_model(user_id))
+    current_topic = asyncio.run(get_current_topic(user_id))
 
-    text = f"Current Model: {MODELS_INFO[current_model]['name']}\n"
-    text += f"Current Topic: {current_topic}\n\n"
+    text = f"**Current Model:** {MODELS_INFO[current_model]['name']}\n"
+    text += f"**Current Topic:** {current_topic}\n\n"
 
-    text += MODELS_INFO[current_model]["description"]
+    text += f"{MODELS_INFO[current_model]['description']}\n\n"
 
-    text += "\n\nModel Scores:\n"
+    text += "**Model Scores:**\n"
     score_dict = MODELS_INFO[current_model]["scores"]
     for score_key, score_value in score_dict.items():
-        text += "🟢" * score_value + "⚪️" * (5 - score_value) + f" – {score_key}\n"
+        text += "🟢" * score_value + "⚪️" * (5 - score_value) + f" – {score_key.capitalize()}\n"
 
-    text += "\n\nSelect <b>model</b>:"
+    text += "\n**Select Model:**"
 
     # Buttons for models
     model_buttons = []
@@ -439,10 +487,61 @@ async def get_settings_menu(user_id):
         )
 
     # Now, add topic management
-    text += "\n\nYour Topics:"
+    text += "\n\n**Your Topics:**"
+    # This will be handled asynchronously in the handler
+
+    # Placeholder buttons; actual buttons will be added in the handler
+    # Add a button to delete topics
+    delete_topic_button = InlineKeyboardButton("🗑 Delete Topic", callback_data="delete_topic_menu")
+
+    # Organize buttons
+    reply_markup = InlineKeyboardMarkup([
+        model_buttons,
+        [delete_topic_button]
+    ])
+
+    return text, reply_markup
+
+async def settings_handle(update: Update, context):
+    user_id = update.message.from_user.id
+    username = update.message.from_user.username
+    await register_user(user_id, username)
+    
+    text, reply_markup = await get_settings_menu_async(user_id)
+
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def get_settings_menu_async(user_id):
+    current_model = await get_user_model(user_id)
+    current_topic = await get_current_topic(user_id)
+
+    text = f"**Current Model:** {MODELS_INFO[current_model]['name']}\n"
+    text += f"**Current Topic:** {current_topic}\n\n"
+
+    text += f"{MODELS_INFO[current_model]['description']}\n\n"
+
+    text += "**Model Scores:**\n"
+    score_dict = MODELS_INFO[current_model]["scores"]
+    for score_key, score_value in score_dict.items():
+        text += "🟢" * score_value + "⚪️" * (5 - score_value) + f" – {score_key.capitalize()}\n"
+
+    text += "\n**Select Model:**"
+
+    # Buttons for models
+    model_buttons = []
+    for model_key in MODELS_INFO:
+        title = MODELS_INFO[model_key]["name"]
+        if model_key == current_model:
+            title = "✅ " + title
+
+        model_buttons.append(
+            InlineKeyboardButton(title, callback_data=f"set_model|{model_key}")
+        )
+
+    # Fetch active topics
     async with aiosqlite.connect(DATABASE_PATH) as conn:
         c = await conn.cursor()
-        await c.execute("SELECT topic FROM topics WHERE user_id=?", (user_id,))
+        await c.execute("SELECT topic FROM topics WHERE user_id=? AND deleted=0", (user_id,))
         topics = await c.fetchall()
 
     topic_buttons = []
@@ -461,26 +560,16 @@ async def get_settings_menu(user_id):
     # Organize buttons
     reply_markup = InlineKeyboardMarkup([
         model_buttons,
-        topic_buttons,
+        *[topic_buttons[i:i+2] for i in range(0, len(topic_buttons), 2)],
         [delete_topic_button]
     ])
 
     return text, reply_markup
 
-async def settings_handle(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    username = update.message.from_user.username
-    await register_user(user_id, username)
-    
-    text, reply_markup = await get_settings_menu(user_id)
-
-    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
-
-async def set_model_handle(update: Update, context: CallbackContext):
+async def set_model_handle(update: Update, context):
     query = update.callback_query
+    await query.answer()
     user_id = query.from_user.id
-    username = query.from_user.username
-    await register_user(user_id, username)
 
     # Get selected model from callback data
     _, model_key = query.data.split("|")
@@ -489,29 +578,26 @@ async def set_model_handle(update: Update, context: CallbackContext):
     await set_user_model(user_id, model_key)
 
     # Get updated settings menu
-    text, reply_markup = await get_settings_menu(user_id)
-
-    await query.answer()
+    text, reply_markup = await get_settings_menu_async(user_id)
 
     try:
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     except error.BadRequest as e:
-        if str(e).startswith("Message is not modified"):
-            pass  # Ignore this specific error
-        else:
+        if "Message is not modified" not in str(e):
             print(f"Error editing message: {e}")
 
-async def set_topic_handle(update: Update, context: CallbackContext):
+async def set_topic_handle(update: Update, context):
     query = update.callback_query
+    await query.answer()
     user_id = query.from_user.id
 
     # Get selected topic from callback data
     _, topic_name = query.data.split("|")
 
-    # Check if the topic exists for the user
+    # Check if the topic exists for the user and is not deleted
     async with aiosqlite.connect(DATABASE_PATH) as conn:
         c = await conn.cursor()
-        await c.execute("SELECT topic FROM topics WHERE user_id=? AND topic=?", (user_id, topic_name))
+        await c.execute("SELECT topic FROM topics WHERE user_id=? AND topic=? AND deleted=0", (user_id, topic_name))
         result = await c.fetchone()
 
     if result:
@@ -519,32 +605,29 @@ async def set_topic_handle(update: Update, context: CallbackContext):
         await set_current_topic(user_id, topic_name)
 
         # Get updated settings menu
-        text, reply_markup = await get_settings_menu(user_id)
-
-        await query.answer()
+        text, reply_markup = await get_settings_menu_async(user_id)
 
         try:
-            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
+            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
         except error.BadRequest as e:
-            if str(e).startswith("Message is not modified"):
-                pass  # Ignore this specific error
-            else:
+            if "Message is not modified" not in str(e):
                 print(f"Error editing message: {e}")
     else:
-        await query.answer("Topic not found.")
+        await query.answer("Topic not found or has been deleted.")
 
-async def delete_topic_menu_handle(update: Update, context: CallbackContext):
+async def delete_topic_menu_handle(update: Update, context):
     query = update.callback_query
+    await query.answer()
     user_id = query.from_user.id
 
-    # Get the list of topics
+    # Get the list of active topics
     async with aiosqlite.connect(DATABASE_PATH) as conn:
         c = await conn.cursor()
-        await c.execute("SELECT topic FROM topics WHERE user_id=?", (user_id,))
+        await c.execute("SELECT topic FROM topics WHERE user_id=? AND deleted=0", (user_id,))
         topics = await c.fetchall()
 
     if not topics:
-        await query.answer("You have no topics to delete.")
+        await query.edit_message_text("You have no topics to delete.")
         return
 
     # Build buttons for deleting topics
@@ -558,39 +641,35 @@ async def delete_topic_menu_handle(update: Update, context: CallbackContext):
     button_rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
     reply_markup = InlineKeyboardMarkup(button_rows)
 
-    await query.answer()
     await query.edit_message_text("Select a topic to delete:", reply_markup=reply_markup)
 
-async def delete_topic_handle(update: Update, context: CallbackContext):
+async def delete_topic_handle(update: Update, context):
     query = update.callback_query
+    await query.answer()
     user_id = query.from_user.id
 
     # Get selected topic from callback data
     _, topic_name = query.data.split("|")
 
-    # Delete the topic and associated messages
+    # Mark the topic as deleted
     async with aiosqlite.connect(DATABASE_PATH) as conn:
         c = await conn.cursor()
-        await c.execute("DELETE FROM topics WHERE user_id=? AND topic=?", (user_id, topic_name))
-        await c.execute("DELETE FROM chat_history WHERE user_id=? AND topic=?", (user_id, topic_name))
-
-        # If the deleted topic was the current topic, unset it
-        current_topic = await get_current_topic(user_id)
-        if current_topic == topic_name:
-            await set_current_topic(user_id, None)
-
+        await c.execute("UPDATE topics SET deleted=1 WHERE user_id=? AND topic=?", (user_id, topic_name))
         await conn.commit()
 
-    # Get updated settings menu
-    text, reply_markup = await get_settings_menu(user_id)
+    # If the deleted topic was the current topic, unset it
+    current_topic = await get_current_topic(user_id)
+    if current_topic == topic_name:
+        await set_current_topic(user_id, None)
 
+    # Get updated settings menu
+    text, reply_markup = await get_settings_menu_async(user_id)
+
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     await query.answer("Topic deleted.")
-    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 ### MAIN ###
 if __name__ == '__main__':
-    # No need to initialize the SQLite database here; it will be initialized in post_init
-
     # Create the bot application
     app = (
         ApplicationBuilder()
@@ -623,7 +702,7 @@ if __name__ == '__main__':
     
     # Message handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.Document.TEXT, handle_document))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     # Start the bot (this will run the event loop)
     app.run_polling()

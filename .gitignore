@@ -162,3 +162,4 @@ run.sh
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 bot/database/chatbot.db
+chatbot.db
