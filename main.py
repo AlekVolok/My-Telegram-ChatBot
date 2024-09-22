@@ -405,8 +405,8 @@ async def handle_text(update: Update, context):
 
     topic = await get_current_topic(user_id)
     if not topic:
-        await update.message.reply_text("Please start a new chat using /new command.")
-        return
+        await update.message.reply_text("You don't have an active topic. Please select or create one using /topic.")
+        return TOPIC_INPUT  # Start the conversation state
 
     # Set the typing action while waiting for the response
     await update.message.chat.send_action(action="typing")
@@ -438,7 +438,7 @@ async def handle_document(update: Update, context):
         if not extracted_text.strip():
             await update.message.reply_text("Sorry, I couldn't extract any text from this document.")
             os.remove(temp_file_path)
-            return
+            return TOPIC_INPUT
 
         # Send an initial message to the user to indicate that processing has started
         msg = await update.message.reply_text("Processing the document...")
@@ -460,12 +460,13 @@ async def handle_document(update: Update, context):
         await update.message.chat.send_action(action="typing")
 
         # Database operations
+        user_id = update.message.from_user.id
         username = update.message.from_user.username
         await register_user(user_id, username)
         topic = await get_current_topic(user_id)
 
         if not topic:
-            await update.message.reply_text("Please start a new chat using /new command.")
+            await update.message.reply_text("You don't have an active topic. Please select or create one using /topic.")
             return
 
         # Get response from AI 
@@ -488,14 +489,14 @@ async def handle_document(update: Update, context):
 async def start(update: Update, context) -> None:
     await update.message.reply_text("Welcome to the bot! Use /help to see available commands.")
 
-# Handler for /new command to start a new chat
-async def start_new(update: Update, context) -> int:
-    user_id = update.message.from_user.id
-    username = update.message.from_user.username
-    await register_user(user_id, username)
+# # Handler for /new command to start a new chat
+# async def start_new(update: Update, context) -> int:
+#     user_id = update.message.from_user.id
+#     username = update.message.from_user.username
+#     await register_user(user_id, username)
 
-    await update.message.reply_text("Please enter a topic name for the new chat, or type 'auto' to generate one automatically.")
-    return TOPIC_INPUT
+#     await update.message.reply_text("Please enter a topic name for the new chat, or type 'auto' to generate one automatically.")
+#     return TOPIC_INPUT
 
 # Handler to receive topic name
 async def receive_topic_name(update: Update, context) -> int:
@@ -503,19 +504,19 @@ async def receive_topic_name(update: Update, context) -> int:
     username = update.message.from_user.username
     topic_name = update.message.text.strip()
 
-    if topic_name.lower() == 'auto':
-        topic = await start_new_chat(user_id)
-        if topic:
-            await update.message.reply_text(f"New chat started with topic: {topic}")
-        else:
-            await update.message.reply_text("Failed to start a new chat. Please try again.")
+    if topic_name.lower() == 'cancel':
+        await update.message.reply_text("Operation cancelled.")
+        return ConversationHandler.END
+
+    # Register user in case not registered
+    await register_user(user_id, username)
+
+    # Start a new chat with the provided topic name
+    new_topic = await start_new_chat(user_id, topic_name)
+    if new_topic:
+        await update.message.reply_text(f"New topic created: {new_topic}")
     else:
-        topic = topic_name
-        new_topic = await start_new_chat(user_id, topic)
-        if new_topic:
-            await update.message.reply_text(f"New chat started with topic: {new_topic}")
-        else:
-            await update.message.reply_text("Failed to start a new chat. Please try again.")
+        await update.message.reply_text("Failed to create a new topic. Please try again.")
 
     return ConversationHandler.END
 
@@ -526,9 +527,8 @@ async def help_handle(update: Update, context) -> None:
     current_topic = await get_current_topic(user_id)
     await update.message.reply_text(
         f"**Current Model:** {MODELS_INFO[current_model]['name']}"
-        f"\n\n**Topic:** {current_topic}"
+        f"\n\n**Current Topic:** {current_topic if current_topic else 'No active topic'}"
         "\n\n**Commands:**"
-        "\n/new - Start new dialog"
         "\n/topic - Manage your topics"
         "\n/models - Manage your AI models"
         "\n/help - Show help message",
@@ -738,10 +738,9 @@ async def delete_topic_handle(update: Update, context):
 async def add_topic_handle(update: Update, context):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
 
     # Prompt user to enter a new topic name
-    await query.edit_message_text("Please enter the name of the new topic:")
+    await query.edit_message_text("Please enter the name of the new topic (or type 'cancel' to abort):")
     return TOPIC_INPUT
 
 # Handler to refresh topics
@@ -784,7 +783,6 @@ async def set_bot_commands(application):
     bot_commands = [
         BotCommand("start", "Start the bot"),
         BotCommand("help", "Show help message"),
-        BotCommand("new", "Start new dialog"),
         BotCommand("topic", "Manage your topics"),
         BotCommand("models", "Manage your AI models"),
         BotCommand("settings", "Show settings"),
@@ -807,12 +805,21 @@ if __name__ == '__main__':
 
     # Conversation handler for /new command
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('new', start_new)],
+        entry_points=[
+            CallbackQueryHandler(add_topic_handle, pattern="^add_topic$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_topic_name),  # For automatic prompting
+        ],
         states={
             TOPIC_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_topic_name)],
         },
-        fallbacks=[CommandHandler('cancel', cancel_conversation)],
+        fallbacks=[
+            CommandHandler('cancel', cancel_conversation),
+            MessageHandler(filters.Regex('^cancel$'), cancel_conversation),
+        ],
     )
+
+    # Register the updated conversation handler
+    app.add_handler(conv_handler)
 
     # Command handlers
     app.add_handler(CommandHandler("start", start))
