@@ -610,9 +610,6 @@ async def get_models_menu_async(user_id):
             InlineKeyboardButton(title, callback_data=f"set_model|{model_key}")
         )
 
-    # Add a refresh button
-    model_buttons.append(InlineKeyboardButton("🔄 Refresh", callback_data="refresh_models"))
-
     reply_markup = InlineKeyboardMarkup([
         model_buttons
     ])
@@ -749,16 +746,6 @@ async def refresh_topics_handle(update: Update, context):
 
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
-# Handler to refresh models
-async def refresh_models_handle(update: Update, context):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    text, reply_markup = await get_models_menu_async(user_id)
-
-    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-
 # Handler to go back to topic menu
 async def back_to_topic_menu_handle(update: Update, context):
     query = update.callback_query
@@ -834,7 +821,6 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(delete_topic_handle, pattern="^delete_topic\|"))
     app.add_handler(CallbackQueryHandler(add_topic_handle, pattern="^add_topic"))
     app.add_handler(CallbackQueryHandler(refresh_topics_handle, pattern="^refresh_topics"))
-    app.add_handler(CallbackQueryHandler(refresh_models_handle, pattern="^refresh_models"))
     app.add_handler(CallbackQueryHandler(back_to_topic_menu_handle, pattern="^back_to_topic_menu"))
     app.add_handler(CallbackQueryHandler(back_to_models_menu_handle, pattern="^back_to_models_menu"))
 
