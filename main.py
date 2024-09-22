@@ -557,15 +557,23 @@ async def get_topic_menu_async(user_id):
 
     if not topics:
         text += "You have no topics. Use /new to create one."
-        buttons = [
-            [InlineKeyboardButton("🔄 Refresh", callback_data="refresh_topics")]
-        ]
+        buttons = []
     else:
+        # Get the user's current topic
+        current_topic = await get_current_topic(user_id)
+
         buttons = []
         for topic_tuple in topics:
             topic_name = topic_tuple[0]
+
+            # Add "✅ " symbol if this is the current topic
+            if topic_name == current_topic:
+                display_name = "✅ " + topic_name
+            else:
+                display_name = topic_name
+
             buttons.append(
-                [InlineKeyboardButton(topic_name, callback_data=f"select_topic|{topic_name}")]
+                [InlineKeyboardButton(display_name, callback_data=f"select_topic|{topic_name}")]
             )
         # Add buttons for deleting topics and adding a new topic
         buttons.append([
