@@ -7,3 +7,4 @@ python-docx
 tiktoken
 aiosqlite
 google-generativeai
+mistune
