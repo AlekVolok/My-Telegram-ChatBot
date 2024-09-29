@@ -334,7 +334,7 @@ async def get_ai_response(prompt: str, user_id, topic):
     selected_model = await get_user_model(user_id)
     max_tokens = MODELS_INFO[selected_model]['max_tokens']  # Retrieve per-model max_tokens
     conversation_history = await get_conversation_history(user_id, topic, max_tokens)
-    final_prompt = prompt + "\n Respond with Markdown. No more than 4000 characters."
+    final_prompt = prompt + "\nRespond with Markdown"
     # Ensure conversation_history is not None
     if not conversation_history:
         conversation_history = []
@@ -369,207 +369,145 @@ async def get_ai_response(prompt: str, user_id, topic):
         
         else:
             return "Selected AI provider is not supported."
-    
+    except genai.exceptions.StopCandidateException as e:
+        print("The last message of the chat_session is blocked by Gemini because of Safety reasons.")
+        return "The last message of the chat_session is blocked by Gemini because of Safety reasons."
     except Exception as e:
         print(f"Error generating response with {provider}: {e}")
         return "Sorry, I couldn't process your request at the moment."
 
 ### HELPERS ###
-# Reformat text for MarkdownV2
-def reformat_markdown_to_v2(text: str) -> str:
-    def escape(text, exclude_formatting=False):
-        special_chars = '_*[]()~`>#+-=|{}.!'
-        if exclude_formatting:
-            special_chars = special_chars.replace('_', '').replace('*', '').replace('~', '').replace('`', '').replace('>', '')
-        escaped_text = ''
-        for c in text:
-            if c == '\\':
-                escaped_text += '\\\\'
-            elif c in special_chars:
-                escaped_text += '\\' + c
-            else:
-                escaped_text += c
-        return escaped_text
+import mistune
+import html
 
-    def extract_code_blocks(text):
-        code_blocks = []
+class TelegramHTMLRenderer(mistune.HTMLRenderer):
+    def __init__(self):
+        super().__init__()
 
-        code_block_pattern = re.compile(r'```.*?```', re.DOTALL)
+    def text(self, text):
+        # Escape <, >, & in text nodes
+        return html.escape(text)
 
-        def replace_code_block(match):
-            code_content = match.group(0)
-            placeholder = f"{{CODEBLOCK{len(code_blocks)}}}"
-            code_blocks.append(code_content)
-            return placeholder
+    def heading(self, text, level, raw=None):
+        """
+        Convert Markdown headers to italic bold as per your requirement.
+        Example: ## Header becomes <b><i>Header</i></b>
+        """
+        return f'<b><i>{text}</i></b>\n'
 
-        text = code_block_pattern.sub(replace_code_block, text)
-        return text, code_blocks
+    def strong(self, text):
+        return f'<b>{text}</b>'
 
-    def extract_code_spans(text):
-        code_spans = []
+    def emphasis(self, text):
+        return f'<i>{text}</i>'
 
-        code_span_pattern = re.compile(r'`[^`]*`')
+    def codespan(self, text):
+        """
+        Convert inline code to <code> tags.
+        Escape backslashes and backticks inside code.
+        """
+        escaped = text.replace('\\', '\\\\').replace('`', '\\`')
+        return f'<code>{escaped}</code>'
 
-        def replace_code_span(match):
-            code_content = match.group(0)
-            placeholder = f"{{CODESPAN{len(code_spans)}}}"
-            code_spans.append(code_content)
-            return placeholder
+    def block_code(self, code, info=None):
+        """
+        Convert code blocks to <pre> or <pre><code> with language class.
+        Escape backslashes and backticks inside code.
+        """
+        escaped = code.replace('\\', '\\\\').replace('`', '\\`')
+        if info:
+            # Telegram supports specifying the programming language
+            # Example: ```python``` becomes <pre><code class="language-python">code</code></pre>
+            language = html.escape(info.strip())
+            return f'<pre><code class="language-{language}">{escaped}</code></pre>\n'
+        else:
+            return f'<pre>{escaped}</pre>\n'
 
-        text = code_span_pattern.sub(replace_code_span, text)
-        return text, code_spans
+    def link(self, link, title, text):
+        """
+        Convert Markdown links to <a href="...">text</a>
+        Escape the URL appropriately.
+        """
+        escaped_url = html.escape(link, quote=True)
+        return f'<a href="{escaped_url}">{text}</a>'
 
-    def process_headers(text):
-        header_pattern = re.compile(r'^(#{1,6})\s*(.*)', re.MULTILINE)
+    def list(self, text, ordered, start=None, **kwargs):
+        """
+        Telegram does not support <ul> or <ol>, so we'll render lists as plain text with bullets or numbers.
+        'text' contains the rendered list items.
+        """
+        if ordered:
+            # Split the items by newline and prepend numbers
+            items = text.strip().split('\n')
+            ordered_list = []
+            current = start if start else 1
+            for item in items:
+                if item.strip():  # Ensure item is not empty
+                    ordered_list.append(f'{current}. {item}')
+                    current += 1
+            return '\n'.join(ordered_list) + '\n'
+        else:
+            # Unordered list, prepend bullets
+            items = text.strip().split('\n')
+            unordered_list = [f'• {item}' for item in items if item.strip()]
+            return '\n'.join(unordered_list) + '\n'
 
-        def replace_header(match):
-            header_text = match.group(2)
-            escaped_text = escape(header_text)
-            formatted_text = '_*' + escaped_text + '*_'
-            return formatted_text
-
-        text = header_pattern.sub(replace_header, text)
+    def list_item(self, text):
+        """
+        Render list items as text
+        """
         return text
 
-    def process_bold_italic(text):
-        bold_italic_pattern = re.compile(r'(\*\*\*|___)(.+?)\1')
+    def paragraph(self, text):
+        """
+        Render paragraphs separated by double newlines.
+        """
+        return f'{text}\n\n'
 
-        def replace_bold_italic(match):
-            content = match.group(2)
-            escaped_content = escape(content)
-            formatted_content = '_*' + escaped_content + '*_'
-            return formatted_content
+    def block_quote(self, text):
+        """
+        Convert block quotes to <blockquote> tags.
+        """
+        return f'<blockquote>{text.strip()}</blockquote>\n'
 
-        text = bold_italic_pattern.sub(replace_bold_italic, text)
-        return text
+    def strikethrough(self, text):
+        """
+        Convert strikethrough to <s> tags.
+        """
+        return f'<s>{text}</s>'
 
-    def process_bold(text):
-        bold_pattern = re.compile(r'(\*\*|__)(.+?)\1')
+    def inline_html(self, html_content):
+        """
+        Escape any inline HTML to prevent injection of unsupported tags.
+        """
+        return html.escape(html_content)
 
-        def replace_bold(match):
-            content = match.group(2)
-            escaped_content = escape(content)
-            formatted_content = '*' + escaped_content + '*'
-            return formatted_content
+    def image(self, src, alt="", title=None):
+        """
+        Telegram's HTML does not support images, so we'll represent them as alt text.
+        """
+        return html.escape(alt)
 
-        text = bold_pattern.sub(replace_bold, text)
-        return text
+    def newline(self):
+        """
+        Handle newlines in Markdown.
+        """
+        return '\n'
 
-    def process_italic(text):
-        italic_pattern = re.compile(r'(\*|_)(.+?)\1')
+def reformat_markdown_to_html(text: str) -> str:
+    """
+    Converts Markdown text to Telegram's HTML format.
 
-        def replace_italic(match):
-            content = match.group(2)
-            escaped_content = escape(content)
-            formatted_content = '_' + escaped_content + '_'
-            return formatted_content
+    Args:
+        text (str): The input Markdown text.
 
-        text = italic_pattern.sub(replace_italic, text)
-        return text
-
-    def process_strikethrough(text):
-        strikethrough_pattern = re.compile(r'~~(.+?)~~')
-
-        def replace_strikethrough(match):
-            content = match.group(1)
-            escaped_content = escape(content)
-            formatted_content = '~' + escaped_content + '~'
-            return formatted_content
-
-        text = strikethrough_pattern.sub(replace_strikethrough, text)
-        return text
-
-    def process_links(text):
-        link_pattern = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
-
-        def replace_link(match):
-            link_text = match.group(1)
-            link_url = match.group(2)
-            escaped_text = escape(link_text)
-            link_url = link_url.replace('\\', '\\\\').replace(')', '\\)')
-            formatted_link = '[' + escaped_text + '](' + link_url + ')'
-            return formatted_link
-
-        text = link_pattern.sub(replace_link, text)
-        return text
-
-    def process_images(text):
-        image_pattern = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
-
-        def replace_image(match):
-            alt_text = match.group(1)
-            escaped_text = escape(alt_text)
-            return escaped_text
-
-        text = image_pattern.sub(replace_image, text)
-        return text
-
-    def process_block_quotes(text):
-        block_quote_pattern = re.compile(r'^(>+)\s*(.*)', re.MULTILINE)
-
-        def replace_block_quote(match):
-            content = match.group(2)
-            escaped_content = escape(content)
-            formatted_content = match.group(1) + ' ' + escaped_content
-            return formatted_content
-
-        text = block_quote_pattern.sub(replace_block_quote, text)
-        return text
-
-    def process_code_blocks(code_blocks):
-        processed_blocks = []
-
-        for block in code_blocks:
-            code_content = block.strip('`').strip()
-            code_content = code_content.replace('\\', '\\\\').replace('`', '\\`')
-            formatted_block = '```' + code_content + '```'
-            processed_blocks.append(formatted_block)
-
-        return processed_blocks
-
-    def process_code_spans(code_spans):
-        processed_spans = []
-
-        for span in code_spans:
-            code_content = span.strip('`')
-            code_content = code_content.replace('\\', '\\\\').replace('`', '\\`')
-            formatted_span = '`' + code_content + '`'
-            processed_spans.append(formatted_span)
-
-        return processed_spans
-
-    # Extract and process code blocks and spans
-    text, code_blocks = extract_code_blocks(text)
-    text, code_spans = extract_code_spans(text)
-
-    # Process other markdown elements
-    text = process_images(text)
-    text = process_links(text)
-    text = process_strikethrough(text)
-    text = process_bold_italic(text)
-    text = process_bold(text)
-    text = process_italic(text)
-    text = process_headers(text)
-    text = process_block_quotes(text)
-
-    # Escape any remaining special characters
-    text = escape(text, exclude_formatting=True)
-
-    # Process code blocks and spans
-    processed_code_blocks = process_code_blocks(code_blocks)
-    processed_code_spans = process_code_spans(code_spans)
-
-    # Replace placeholders with processed code blocks and spans
-    for i, code_block in enumerate(processed_code_blocks):
-        placeholder = f"{{CODEBLOCK{i}}}"
-        text = text.replace(placeholder, code_block)
-
-    for i, code_span in enumerate(processed_code_spans):
-        placeholder = f"{{CODESPAN{i}}}"
-        text = text.replace(placeholder, code_span)
-
-    return text
-
+    Returns:
+        str: The converted HTML text compatible with Telegram's parse_mode='HTML'.
+    """
+    renderer = TelegramHTMLRenderer()
+    markdown = mistune.create_markdown(renderer=renderer, plugins=['strikethrough'])
+    html_text = markdown(text)
+    return html_text
 
 # Helper function to extract text from a file
 def extract_text_from_file(file_path: str, mime_type: str) -> str:
@@ -598,7 +536,6 @@ def extract_text_from_file(file_path: str, mime_type: str) -> str:
         
 
 ### HANDLERS ###
-
 async def handle_text(update: Update, context):
     user_id = update.message.from_user.id
     username = update.message.from_user.username
@@ -618,8 +555,9 @@ async def handle_text(update: Update, context):
     await save_message(user_id, topic, ai_response, is_bot_response=True)
 
     # Reply with the AI response
-    markdown_response = reformat_markdown_to_v2(ai_response)
-    await update.message.reply_text(markdown_response, parse_mode="MarkdownV2")
+    markdown_response = helpers.escape_markdown(ai_response, version=2)
+    html_response = reformat_markdown_to_html(ai_response)
+    await update.message.reply_text(html_response, parse_mode="HTML")
 
 async def handle_document(update: Update, context):
     user_message = update.message.caption if update.message.caption else " "  # Default message if no text is provided
