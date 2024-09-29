@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import tempfile
 import asyncio
@@ -8,6 +9,7 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    helpers,
     error
 )
 from telegram.ext import (
@@ -33,40 +35,61 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")  # Add Gemini API Key
+COST_INTEREST_RATE = 1.2  # 20% interest rate for billing
 
 MODELS_INFO = {
     "gpt-4o-mini": {
         "name": "GPT-4o Mini",
         "description": "Lightweight GPT-4 model",
-        "scores": {"speed": 5, "accuracy": 3},
+        "scores": {
+            "Chat": 1273,
+            "Coding": 1282
+            },
         "provider": "openai",
         "api_model": "gpt-4o-mini",
-        "max_tokens": 100000  # Per-model max_tokens
+        "max_tokens": 100000,  # Per-model max_tokens
+        "cost_input": 0.15,  # Cost per 1M token for billing
+        "cost_output": 0.6  
     },
     "gpt-4o": {
         "name": "GPT-4o",
         "description": "Great for most tasks",
-        "scores": {"speed": 3, "accuracy": 5},
+        "scores": {
+            "Chat": 1335,
+            "Coding": 1341
+            },
         "provider": "openai",
         "api_model": "gpt-4o",
-        "max_tokens": 100000  # Per-model max_tokens
+        "max_tokens": 100000,  # Per-model max_tokens
+        "cost_input": 2.5,  # Cost per 1M token for billing
+        "cost_output": 10.0  
     },
     "gemini": {
-        "name": "Gemini",
-        "description": "Google's new Gemini AI. Multi-modal capabilities. 1M token limit!",
-        "scores": {"speed": 4, "accuracy": 4},
+        "name": "Gemini 1.5 Flash",
+        "description": "Google's latest AI. Features:\n -Image processing\n -Audio processing",
+        "scores": {
+            "Chat": 1269,
+            "Coding": 1257
+            },
         "provider": "gemini",
         "api_model": "gemini-1.5-flash",
-        "max_tokens": 9000  # Per-model max_tokens. Reduced because of Free Tier limit
-    },
-    "bing": {
-        "name": "Bing",
-        "description": "GPT-4 with Bing internet search",
-        "scores": {"speed": 5, "accuracy": 2},
-        "provider": "bing",
-        "api_model": "bing",
-        "max_tokens": 100000  # Per-model max_tokens
+        "max_tokens": 100000,  # Per-model max_tokens. Reduced because of Free Tier limit
+        "cost_input": 0.075,  # Cost per 1M token for billing
+        "cost_output": 0.3  # Cost per 1M token for billing
     }
+    # "grok": {
+    #     "name": "Grok-2",
+    #     "description": "Elon Musk's latest AI",
+    #     "scores": {
+    #         "Chat": 1294,
+    #         "Coding": 1286
+    #         },
+    #     "provider": "bing",
+    #     "api_model": "bing",
+    #     "max_tokens": 100000,
+    #     "cost_input": 0.1,
+    #     "cost_output": 0.4
+    # }
 }
 
 ### DATABASE ###
@@ -311,7 +334,9 @@ async def get_ai_response(prompt: str, user_id, topic):
     selected_model = await get_user_model(user_id)
     max_tokens = MODELS_INFO[selected_model]['max_tokens']  # Retrieve per-model max_tokens
     conversation_history = await get_conversation_history(user_id, topic, max_tokens)
-    conversation_history.append({"role": "user", "content": prompt})
+    # Ensure conversation_history is not None
+    if not conversation_history:
+        conversation_history = []
 
     provider = MODELS_INFO[selected_model]["provider"]
     api_model = MODELS_INFO[selected_model]["api_model"]
@@ -319,20 +344,21 @@ async def get_ai_response(prompt: str, user_id, topic):
     try:
         if provider == "openai":
             # OpenAI's response generation remains unchanged
+            full_conversation = conversation_history + [{"role": "user", "content": prompt}]
             response = await asyncio.to_thread(
                 client.chat.completions.create,
                 model=api_model,
-                messages=conversation_history
+                messages=full_conversation
             )
             return response.choices[0].message.content.strip()
         
         elif provider == "gemini":
             # Using Gemini's API for response generation
             model = genai.GenerativeModel(api_model)
-            response = await asyncio.to_thread(
-                model.generate_content,
-                prompt
-            )
+            # Need to format the conversation history for Gemini "content" to "parts", "assistant" to "model"
+            conversation_history = [{"parts": [msg["content"]], "role": "model" if msg["role"] == "assistant" else "user"} for msg in conversation_history]
+            chat = model.start_chat(history=conversation_history)
+            response = chat.send_message(prompt + "\n Respond with Markdown")
             return response.text.strip()
         
         elif provider == "bing":
@@ -372,6 +398,7 @@ def extract_text_from_file(file_path: str, mime_type: str) -> str:
         # Assume it's a plain text file for simplicity
         with open(file_path, 'r', encoding='utf-8') as file:
             return file.read()
+        
 
 ### HANDLERS ###
 
@@ -394,7 +421,7 @@ async def handle_text(update: Update, context):
     await save_message(user_id, topic, ai_response, is_bot_response=True)
 
     # Reply with the AI response
-    await update.message.reply_text(ai_response, parse_mode="Markdown")
+    await update.message.reply_text(helpers.escape_markdown(ai_response), parse_mode="Markdown")
 
 async def handle_document(update: Update, context):
     user_message = update.message.caption if update.message.caption else " "  # Default message if no text is provided
@@ -535,9 +562,11 @@ async def get_settings_menu_async(user_id):
     text += "**Model Scores:**\n"
     score_dict = MODELS_INFO[current_model]["scores"]
     for score_key, score_value in score_dict.items():
-        text += "🟢" * score_value + "⚪️" * (5 - score_value) + f" – {score_key.capitalize()}\n"
-
-    text += "\n**Select Model:**"
+        text += f"{score_key.capitalize()} : {score_value}\n"
+    text += "\nCost per 1M tokens:\n"
+    text += f"Input: ${MODELS_INFO[current_model]['cost_input']*COST_INTEREST_RATE}\n"
+    text += f"Output: ${MODELS_INFO[current_model]['cost_output']*COST_INTEREST_RATE}\n\n"
+    text += "**Select Model:**"
 
     # Buttons for models
     model_buttons = []
