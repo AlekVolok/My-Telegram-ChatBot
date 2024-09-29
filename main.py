@@ -334,6 +334,7 @@ async def get_ai_response(prompt: str, user_id, topic):
     selected_model = await get_user_model(user_id)
     max_tokens = MODELS_INFO[selected_model]['max_tokens']  # Retrieve per-model max_tokens
     conversation_history = await get_conversation_history(user_id, topic, max_tokens)
+    final_prompt = prompt + "\n Respond with Markdown. No more than 4000 characters."
     # Ensure conversation_history is not None
     if not conversation_history:
         conversation_history = []
@@ -344,7 +345,7 @@ async def get_ai_response(prompt: str, user_id, topic):
     try:
         if provider == "openai":
             # OpenAI's response generation remains unchanged
-            full_conversation = conversation_history + [{"role": "user", "content": prompt}]
+            full_conversation = conversation_history + [{"role": "user", "content": final_prompt}]
             response = await asyncio.to_thread(
                 client.chat.completions.create,
                 model=api_model,
@@ -358,7 +359,7 @@ async def get_ai_response(prompt: str, user_id, topic):
             # Need to format the conversation history for Gemini "content" to "parts", "assistant" to "model"
             conversation_history = [{"parts": [msg["content"]], "role": "model" if msg["role"] == "assistant" else "user"} for msg in conversation_history]
             chat = model.start_chat(history=conversation_history)
-            response = chat.send_message(prompt + "\n Respond with Markdown")
+            response = chat.send_message(final_prompt)
             return response.text.strip()
         
         elif provider == "bing":
@@ -374,6 +375,202 @@ async def get_ai_response(prompt: str, user_id, topic):
         return "Sorry, I couldn't process your request at the moment."
 
 ### HELPERS ###
+# Reformat text for MarkdownV2
+def reformat_markdown_to_v2(text: str) -> str:
+    def escape(text, exclude_formatting=False):
+        special_chars = '_*[]()~`>#+-=|{}.!'
+        if exclude_formatting:
+            special_chars = special_chars.replace('_', '').replace('*', '').replace('~', '').replace('`', '').replace('>', '')
+        escaped_text = ''
+        for c in text:
+            if c == '\\':
+                escaped_text += '\\\\'
+            elif c in special_chars:
+                escaped_text += '\\' + c
+            else:
+                escaped_text += c
+        return escaped_text
+
+    def extract_code_blocks(text):
+        code_blocks = []
+
+        code_block_pattern = re.compile(r'```.*?```', re.DOTALL)
+
+        def replace_code_block(match):
+            code_content = match.group(0)
+            placeholder = f"{{CODEBLOCK{len(code_blocks)}}}"
+            code_blocks.append(code_content)
+            return placeholder
+
+        text = code_block_pattern.sub(replace_code_block, text)
+        return text, code_blocks
+
+    def extract_code_spans(text):
+        code_spans = []
+
+        code_span_pattern = re.compile(r'`[^`]*`')
+
+        def replace_code_span(match):
+            code_content = match.group(0)
+            placeholder = f"{{CODESPAN{len(code_spans)}}}"
+            code_spans.append(code_content)
+            return placeholder
+
+        text = code_span_pattern.sub(replace_code_span, text)
+        return text, code_spans
+
+    def process_headers(text):
+        header_pattern = re.compile(r'^(#{1,6})\s*(.*)', re.MULTILINE)
+
+        def replace_header(match):
+            header_text = match.group(2)
+            escaped_text = escape(header_text)
+            formatted_text = '_*' + escaped_text + '*_'
+            return formatted_text
+
+        text = header_pattern.sub(replace_header, text)
+        return text
+
+    def process_bold_italic(text):
+        bold_italic_pattern = re.compile(r'(\*\*\*|___)(.+?)\1')
+
+        def replace_bold_italic(match):
+            content = match.group(2)
+            escaped_content = escape(content)
+            formatted_content = '_*' + escaped_content + '*_'
+            return formatted_content
+
+        text = bold_italic_pattern.sub(replace_bold_italic, text)
+        return text
+
+    def process_bold(text):
+        bold_pattern = re.compile(r'(\*\*|__)(.+?)\1')
+
+        def replace_bold(match):
+            content = match.group(2)
+            escaped_content = escape(content)
+            formatted_content = '*' + escaped_content + '*'
+            return formatted_content
+
+        text = bold_pattern.sub(replace_bold, text)
+        return text
+
+    def process_italic(text):
+        italic_pattern = re.compile(r'(\*|_)(.+?)\1')
+
+        def replace_italic(match):
+            content = match.group(2)
+            escaped_content = escape(content)
+            formatted_content = '_' + escaped_content + '_'
+            return formatted_content
+
+        text = italic_pattern.sub(replace_italic, text)
+        return text
+
+    def process_strikethrough(text):
+        strikethrough_pattern = re.compile(r'~~(.+?)~~')
+
+        def replace_strikethrough(match):
+            content = match.group(1)
+            escaped_content = escape(content)
+            formatted_content = '~' + escaped_content + '~'
+            return formatted_content
+
+        text = strikethrough_pattern.sub(replace_strikethrough, text)
+        return text
+
+    def process_links(text):
+        link_pattern = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
+
+        def replace_link(match):
+            link_text = match.group(1)
+            link_url = match.group(2)
+            escaped_text = escape(link_text)
+            link_url = link_url.replace('\\', '\\\\').replace(')', '\\)')
+            formatted_link = '[' + escaped_text + '](' + link_url + ')'
+            return formatted_link
+
+        text = link_pattern.sub(replace_link, text)
+        return text
+
+    def process_images(text):
+        image_pattern = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+
+        def replace_image(match):
+            alt_text = match.group(1)
+            escaped_text = escape(alt_text)
+            return escaped_text
+
+        text = image_pattern.sub(replace_image, text)
+        return text
+
+    def process_block_quotes(text):
+        block_quote_pattern = re.compile(r'^(>+)\s*(.*)', re.MULTILINE)
+
+        def replace_block_quote(match):
+            content = match.group(2)
+            escaped_content = escape(content)
+            formatted_content = match.group(1) + ' ' + escaped_content
+            return formatted_content
+
+        text = block_quote_pattern.sub(replace_block_quote, text)
+        return text
+
+    def process_code_blocks(code_blocks):
+        processed_blocks = []
+
+        for block in code_blocks:
+            code_content = block.strip('`').strip()
+            code_content = code_content.replace('\\', '\\\\').replace('`', '\\`')
+            formatted_block = '```' + code_content + '```'
+            processed_blocks.append(formatted_block)
+
+        return processed_blocks
+
+    def process_code_spans(code_spans):
+        processed_spans = []
+
+        for span in code_spans:
+            code_content = span.strip('`')
+            code_content = code_content.replace('\\', '\\\\').replace('`', '\\`')
+            formatted_span = '`' + code_content + '`'
+            processed_spans.append(formatted_span)
+
+        return processed_spans
+
+    # Extract and process code blocks and spans
+    text, code_blocks = extract_code_blocks(text)
+    text, code_spans = extract_code_spans(text)
+
+    # Process other markdown elements
+    text = process_images(text)
+    text = process_links(text)
+    text = process_strikethrough(text)
+    text = process_bold_italic(text)
+    text = process_bold(text)
+    text = process_italic(text)
+    text = process_headers(text)
+    text = process_block_quotes(text)
+
+    # Escape any remaining special characters
+    text = escape(text, exclude_formatting=True)
+
+    # Process code blocks and spans
+    processed_code_blocks = process_code_blocks(code_blocks)
+    processed_code_spans = process_code_spans(code_spans)
+
+    # Replace placeholders with processed code blocks and spans
+    for i, code_block in enumerate(processed_code_blocks):
+        placeholder = f"{{CODEBLOCK{i}}}"
+        text = text.replace(placeholder, code_block)
+
+    for i, code_span in enumerate(processed_code_spans):
+        placeholder = f"{{CODESPAN{i}}}"
+        text = text.replace(placeholder, code_span)
+
+    return text
+
+
 # Helper function to extract text from a file
 def extract_text_from_file(file_path: str, mime_type: str) -> str:
     if mime_type == 'application/pdf':
@@ -421,7 +618,8 @@ async def handle_text(update: Update, context):
     await save_message(user_id, topic, ai_response, is_bot_response=True)
 
     # Reply with the AI response
-    await update.message.reply_text(helpers.escape_markdown(ai_response), parse_mode="Markdown")
+    markdown_response = reformat_markdown_to_v2(ai_response)
+    await update.message.reply_text(markdown_response, parse_mode="MarkdownV2")
 
 async def handle_document(update: Update, context):
     user_message = update.message.caption if update.message.caption else " "  # Default message if no text is provided
