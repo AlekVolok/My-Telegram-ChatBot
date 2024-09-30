@@ -96,7 +96,7 @@ MODELS_INFO = {
 DATABASE_PATH = "chatbot.db"
 ENCODER = tiktoken.encoding_for_model("gpt-4")
 # MAX_TOKENS = 100000  # Removed global MAX_TOKENS as we now have per-model max_tokens
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gemini-1.5-flash"
 
 # Conversation states
 TOPIC_INPUT = 1
@@ -669,22 +669,36 @@ async def help_handle(update: Update, context) -> None:
         parse_mode="Markdown"
     )
 
-async def show_topic(update: Update, context) -> None:
-    user_id = update.message.from_user.id
-    username = update.message.from_user.username
-    await register_user(user_id, username)
-    topic = await get_current_topic(user_id)
-    await update.message.reply_text(f"**Current topic:** {topic}", parse_mode="Markdown")
+async def get_topic_menu_async(user_id) -> None:
 
-async def post_init(application):
-    await init_db()
-    await migrate_db()  # Ensure migration is applied
-    await application.bot.set_my_commands([
-        BotCommand("/new", "Start new dialog"),
-        BotCommand("/settings", "Show settings"),
-        BotCommand("/topic", "Show current topic"),
-        BotCommand("/help", "Show help message"),
+    # await register_user(user_id, username)
+    # topic = await get_current_topic(user_id)
+    current_topic = await get_current_topic(user_id)
+    topic_buttons = []
+    # Fetch active topics
+    async with aiosqlite.connect(DATABASE_PATH) as conn:
+        c = await conn.cursor()
+        await c.execute("SELECT topic FROM topics WHERE user_id=? AND deleted=0", (user_id,))
+        topics = await c.fetchall()
+    for (topic_name,) in topics:
+        if topic_name == current_topic:
+            title = "✅ " + topic_name
+        else:
+            title = topic_name
+        topic_buttons.append(
+            InlineKeyboardButton(title, callback_data=f"set_topic|{topic_name}")
+        )
+
+    # Add a button to delete topics
+    delete_topic_button = InlineKeyboardButton("🗑 Delete Topic", callback_data="delete_topic_menu")
+
+    # Organize buttons
+    reply_markup = InlineKeyboardMarkup([
+        *[topic_buttons[i:i+2] for i in range(0, len(topic_buttons), 2)],
+        [delete_topic_button]
     ])
+    return "", reply_markup
+
 
 async def get_settings_menu_async(user_id):
     current_model = await get_user_model(user_id)
@@ -721,27 +735,26 @@ async def get_settings_menu_async(user_id):
         await c.execute("SELECT topic FROM topics WHERE user_id=? AND deleted=0", (user_id,))
         topics = await c.fetchall()
 
-    topic_buttons = []
-    for (topic_name,) in topics:
-        if topic_name == current_topic:
-            title = "✅ " + topic_name
-        else:
-            title = topic_name
-        topic_buttons.append(
-            InlineKeyboardButton(title, callback_data=f"set_topic|{topic_name}")
-        )
+    # output_buttons = []
+    # for output_type in output_types:
+    #     if topic_name == current_topic:
+    #         title = "✅ " + topic_name
+    #     else:
+    #         title = topic_name
+    #     topic_buttons.append(
+    #         InlineKeyboardButton(title, callback_data=f"set_topic|{topic_name}")
+    #     )
 
     # Add a button to delete topics
-    delete_topic_button = InlineKeyboardButton("🗑 Delete Topic", callback_data="delete_topic_menu")
+    #delete_topic_button = InlineKeyboardButton("🗑 Delete Topic", callback_data="delete_topic_menu")
 
     # Organize buttons
     reply_markup = InlineKeyboardMarkup([
         model_buttons,
-        *[topic_buttons[i:i+2] for i in range(0, len(topic_buttons), 2)],
-        [delete_topic_button]
     ])
 
     return text, reply_markup
+
 
 async def settings_handle(update: Update, context):
     user_id = update.message.from_user.id
@@ -751,6 +764,16 @@ async def settings_handle(update: Update, context):
     text, reply_markup = await get_settings_menu_async(user_id)
 
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+async def topic_handle(update: Update, context):
+    user_id = update.message.from_user.id
+    username = update.message.from_user.username
+    await register_user(user_id, username)
+    
+    text, reply_markup = await get_topic_menu_async(user_id)
+
+    await update.message.reply_text("Select or delete your topic:", reply_markup=reply_markup, parse_mode="Markdown")
 
 async def set_model_handle(update: Update, context):
     query = update.callback_query
@@ -790,11 +813,11 @@ async def set_topic_handle(update: Update, context):
         # Set the user's current topic
         await set_current_topic(user_id, topic_name)
 
-        # Get updated settings menu
-        text, reply_markup = await get_settings_menu_async(user_id)
+        # Get updated topic menu
+        text, reply_markup = await get_topic_menu_async(user_id)
 
         try:
-            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+            await query.edit_message_reply_markup(reply_markup=reply_markup)
         except error.BadRequest as e:
             if "Message is not modified" not in str(e):
                 print(f"Error editing message: {e}")
@@ -849,11 +872,22 @@ async def delete_topic_handle(update: Update, context):
         await set_current_topic(user_id, None)
 
     # Get updated settings menu
-    text, reply_markup = await get_settings_menu_async(user_id)
+    text, reply_markup = await get_topic_menu_async(user_id)
 
-    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    await query.edit_message_reply_markup(reply_markup=reply_markup)
     await query.answer("Topic deleted.")
 
+
+async def post_init(application):
+    await init_db()
+    await migrate_db()  # Ensure migration is applied
+    await application.bot.set_my_commands([
+        BotCommand("/new", "Start new dialog"),
+        BotCommand("/settings", "Show settings"),
+        BotCommand("/topic", "Show current topic"),
+        BotCommand("/help", "Show help message"),
+    ])
+    
 ### MAIN ###
 if __name__ == '__main__':
     # Create the bot application
@@ -877,7 +911,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("help", help_handle))
-    app.add_handler(CommandHandler("topic", show_topic))
+    app.add_handler(CommandHandler("topic", topic_handle))
     app.add_handler(CommandHandler("settings", settings_handle))
     
     # Callback handlers
